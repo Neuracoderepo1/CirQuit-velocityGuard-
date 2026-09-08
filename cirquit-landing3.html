@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CirQuit — a circuit breaker for AI spend</title>
+<meta name="description" content="CirQuit reserves the cost of every metered API call before it's spent, and cuts off a tenant, provider, or route the instant velocity crosses your limit.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#10141C;
+    --panel:#171D28;
+    --panel-raised:#1D2432;
+    --line:#2A3240;
+    --text:#E7EAF0;
+    --text-dim:#8992A3;
+    --text-faint:#5B6373;
+    --amber:#E2A33B;
+    --amber-dim:#8A6A2E;
+    --red:#D65C4F;
+    --radius:3px;
+  }
+
+  *{ box-sizing:border-box; }
+  html{ scroll-behavior:smooth; }
+  body{
+    margin:0;
+    background:var(--ink);
+    color:var(--text);
+    font-family:'Public Sans', system-ui, sans-serif;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{
+    font-family:'IBM Plex Mono', 'SFMono-Regular', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  a{ color:inherit; }
+  ::selection{ background:var(--amber-dim); color:var(--ink); }
+
+  :focus-visible{
+    outline: 2px solid var(--amber);
+    outline-offset: 3px;
+  }
+
+  .wrap{
+    max-width:1180px;
+    margin:0 auto;
+    padding:0 32px;
+  }
+
+  /* ---------- header ---------- */
+  header{
+    padding:28px 0;
+    border-bottom:1px solid var(--line);
+  }
+  .header-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+  }
+  .wordmark{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    font-weight:700;
+    font-size:19px;
+    letter-spacing:-0.01em;
+    text-decoration:none;
+  }
+  .wordmark svg{ flex-shrink:0; }
+  .wordmark-primary{ display:inline-flex; align-items:baseline; gap:8px; }
+  .wordmark-sep{ color:var(--text-faint); font-weight:400; }
+  .wordmark-sub{
+    font-size:13px;
+    font-weight:500;
+    color:var(--text-dim);
+    letter-spacing:0;
+  }
+  .header-cta{
+    font-size:14px;
+    font-weight:600;
+    color:var(--text);
+    text-decoration:none;
+    border:1px solid var(--line);
+    padding:9px 16px;
+    border-radius:var(--radius);
+    transition:border-color .15s ease, background .15s ease;
+  }
+  .header-cta:hover{
+    border-color:var(--amber-dim);
+    background:var(--panel);
+  }
+
+  /* ---------- hero ---------- */
+  .hero{
+    padding:88px 0 96px;
+    display:grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    gap:64px;
+    align-items:center;
+  }
+  .hero h1{
+    font-size:clamp(34px, 4.4vw, 52px);
+    line-height:1.08;
+    letter-spacing:-0.02em;
+    font-weight:700;
+    margin:0 0 22px;
+    max-width:16ch;
+  }
+  .hero p.sub{
+    font-size:17px;
+    color:var(--text-dim);
+    max-width:46ch;
+    margin:0 0 34px;
+  }
+
+  form.capture{
+    display:flex;
+    gap:10px;
+    max-width:440px;
+  }
+  form.capture input[type="email"]{
+    flex:1;
+    min-width:0;
+    background:var(--panel);
+    border:1px solid var(--line);
+    color:var(--text);
+    font-size:15px;
+    font-family:inherit;
+    padding:13px 14px;
+    border-radius:var(--radius);
+  }
+  form.capture input[type="email"]::placeholder{ color:var(--text-faint); }
+  form.capture input[type="email"]:focus{
+    border-color:var(--amber-dim);
+  }
+  form.capture button{
+    background:var(--amber);
+    color:#1A1305;
+    border:none;
+    font-family:inherit;
+    font-size:15px;
+    font-weight:600;
+    padding:13px 20px;
+    border-radius:var(--radius);
+    cursor:pointer;
+    white-space:nowrap;
+    transition:filter .12s ease, transform .12s ease;
+  }
+  form.capture button:hover{ filter:brightness(1.08); }
+  form.capture button:active{ transform:translateY(1px); }
+
+  .capture-note{
+    font-size:13px;
+    color:var(--text-faint);
+    margin-top:12px;
+  }
+  .capture-status{
+    font-size:14px;
+    margin-top:14px;
+    display:none;
+  }
+  .capture-status.show{ display:block; }
+  .capture-status.ok{ color:var(--amber); }
+  .capture-status.err{ color:var(--red); }
+
+  /* Honeypot field: present in the DOM for bots that fill every input,
+     invisible and unreachable for real users (off-screen, not display:none,
+     since some bots skip display:none fields but not off-screen ones). */
+  .hp-field{
+    position:absolute;
+    left:-9999px;
+    width:1px;
+    height:1px;
+    overflow:hidden;
+  }
+
+  /* ---------- scope panel (hero visual) ---------- */
+  .scope{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:6px;
+    padding:22px 22px 18px;
+  }
+  .scope-head{
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    margin-bottom:16px;
+  }
+  .scope-title{
+    font-size:12.5px;
+    color:var(--text-dim);
+    font-weight:600;
+  }
+  .scope-tenant{
+    font-size:12.5px;
+    color:var(--text-faint);
+  }
+  .scope-readout{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-end;
+    margin-top:16px;
+  }
+  .scope-metric-label{
+    font-size:11.5px;
+    color:var(--text-faint);
+    margin-bottom:4px;
+  }
+  .scope-metric-value{
+    font-size:22px;
+    font-weight:500;
+  }
+  .scope-metric-value.amber{ color:var(--amber); }
+  .scope-metric-value.red{ color:var(--red); }
+  .scope-state{
+    font-size:12.5px;
+    padding:4px 9px;
+    border-radius:2px;
+    font-weight:500;
+  }
+  .scope-state.allow{ background:rgba(226,163,59,0.12); color:var(--amber); }
+  .scope-state.block{ background:rgba(214,92,79,0.15); color:var(--red); }
+
+  @media (prefers-reduced-motion: reduce){
+    .scope svg *{ animation:none !important; }
+  }
+
+  /* ---------- section shells ---------- */
+  section{ padding:72px 0; border-top:1px solid var(--line); }
+
+  .problem{
+    max-width:640px;
+    margin:0 auto;
+    text-align:center;
+  }
+  .problem .kicker{
+    font-size:14px;
+    color:var(--amber);
+    font-weight:600;
+    margin-bottom:14px;
+  }
+  .problem h2{
+    font-size:27px;
+    line-height:1.3;
+    font-weight:600;
+    letter-spacing:-0.01em;
+    margin:0 0 18px;
+  }
+  .problem p{
+    color:var(--text-dim);
+    font-size:16px;
+  }
+
+  /* ---------- pipeline ---------- */
+  .pipeline h2{
+    font-size:24px;
+    font-weight:600;
+    margin:0 0 8px;
+    max-width:22ch;
+  }
+  .pipeline > p{
+    color:var(--text-dim);
+    font-size:15.5px;
+    max-width:56ch;
+    margin:0 0 44px;
+  }
+  .breakers{
+    display:flex;
+    align-items:stretch;
+    gap:0;
+  }
+  .breaker{
+    flex:1;
+    position:relative;
+    padding-top:28px;
+  }
+  .breaker-trace{
+    position:absolute;
+    top:13px;
+    left:-50%;
+    width:100%;
+    height:1px;
+    background:var(--line);
+  }
+  .breaker:first-child .breaker-trace{ display:none; }
+  .switch{
+    width:22px;
+    height:22px;
+    border-radius:50%;
+    border:1.5px solid var(--amber-dim);
+    background:var(--panel-raised);
+    margin-bottom:16px;
+    position:relative;
+    z-index:1;
+  }
+  .switch::after{
+    content:"";
+    position:absolute;
+    inset:6px;
+    border-radius:50%;
+    background:var(--amber);
+  }
+  .breaker-num{
+    font-size:11.5px;
+    color:var(--text-faint);
+    margin-bottom:6px;
+  }
+  .breaker-name{
+    font-size:15px;
+    font-weight:600;
+    margin-bottom:8px;
+  }
+  .breaker-desc{
+    font-size:13.5px;
+    color:var(--text-dim);
+    line-height:1.5;
+    max-width:22ch;
+  }
+
+  /* ---------- footer capture ---------- */
+  .foot-capture{
+    text-align:left;
+  }
+  .foot-capture h2{
+    font-size:26px;
+    font-weight:600;
+    margin:0 0 12px;
+    max-width:20ch;
+  }
+  .foot-capture p{
+    color:var(--text-dim);
+    font-size:15.5px;
+    margin:0 0 28px;
+    max-width:46ch;
+  }
+
+  footer.site{
+    border-top:1px solid var(--line);
+    padding:26px 0;
+  }
+  .footer-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    font-size:13px;
+    color:var(--text-faint);
+  }
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 860px){
+    .hero{ grid-template-columns:1fr; padding:56px 0 64px; }
+    .hero p.sub{ max-width:none; }
+    form.capture{ max-width:none; flex-direction:column; }
+    form.capture button{ width:100%; }
+    .breakers{ flex-direction:column; gap:20px; }
+    .breaker{ padding-top:0; padding-left:36px; }
+    .breaker-trace{ display:none !important; }
+    .switch{ position:absolute; left:0; top:0; margin-bottom:0; }
+    .wrap{ padding:0 20px; }
+  }
+  @media (max-width: 480px){
+    .wordmark-sub{ display:none; }
+    .wordmark-sep{ display:none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap header-row">
+    <a href="#" class="wordmark" aria-label="CirQuit">
+      <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="11" cy="11" r="9.25" stroke="#E2A33B" stroke-width="1.5"/>
+        <path d="M11 5.5V9.5" stroke="#E2A33B" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M11 12.5V16.5" stroke="#8992A3" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M6.5 11H9" stroke="#8992A3" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M13 11H15.5" stroke="#8992A3" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <span class="wordmark-stack">
+        <span class="wordmark-primary">CirQuit<span class="wordmark-sep">·</span><span class="wordmark-sub">velocityGuard</span></span>
+      </span>
+    </a>
+    <a href="#access" class="header-cta">Protect our AI spend</a>
+  </div>
+</header>
+
+<main>
+  <section class="hero wrap" style="border-top:none;">
+    <div>
+      <h1>Your AI agent doesn't need permission to burn $600,000. It just needs a bug.</h1>
+      <p class="sub">CirQuit is the financial circuit breaker for metered AI infrastructure. Every request gets cost-reserved, velocity-checked, and policy-evaluated before it executes — so a runaway loop gets stopped while it's still cheap, not reported after it isn't.</p>
+
+      <form class="capture" id="hero-form" novalidate>
+        <label for="hero-email" class="sr-only" style="position:absolute;left:-9999px;">Work email</label>
+        <input id="hero-email" type="email" placeholder="you@company.com" autocomplete="email" required>
+        <div class="hp-field" aria-hidden="true">
+          <label for="hero-website">Leave this field empty</label>
+          <input id="hero-website" name="website" type="text" tabindex="-1" autocomplete="off">
+        </div>
+        <button type="submit">Protect our AI spend →</button>
+      </form>
+      <div class="capture-status" id="hero-status" role="status"></div>
+      <p class="capture-note">For teams shipping agents against metered APIs. We reach out before onboarding anyone — no self-serve signup yet.</p>
+    </div>
+
+    <div class="scope" aria-hidden="true">
+      <div class="scope-head">
+        <span class="scope-title">SPEND VELOCITY — live</span>
+        <span class="scope-tenant">tenant: demo-corp</span>
+      </div>
+
+      <svg viewBox="0 0 460 160" width="100%" height="160" preserveAspectRatio="none">
+        <!-- gridlines -->
+        <line x1="0" y1="20" x2="460" y2="20" stroke="#2A3240" stroke-width="1"/>
+        <line x1="0" y1="70" x2="460" y2="70" stroke="#2A3240" stroke-width="1"/>
+        <line x1="0" y1="120" x2="460" y2="120" stroke="#2A3240" stroke-width="1"/>
+
+        <!-- threshold line -->
+        <line x1="0" y1="46" x2="460" y2="46" stroke="#E2A33B" stroke-width="1" stroke-dasharray="4 4" opacity="0.55"/>
+        <text x="4" y="40" fill="#8A6A2E" font-family="IBM Plex Mono" font-size="9">LIMIT</text>
+
+        <!-- allowed portion of trace -->
+        <path d="M0,132 C 40,128 60,110 90,96 C 120,82 150,80 180,68 C 205,58 225,50 245,46"
+              fill="none" stroke="#E2A33B" stroke-width="2" stroke-linecap="round"/>
+
+        <!-- blocked portion of trace -->
+        <path d="M245,46 C 265,38 285,22 300,14"
+              fill="none" stroke="#D65C4F" stroke-width="2" stroke-linecap="round"
+              stroke-dasharray="220" stroke-dashoffset="220">
+          <animate attributeName="stroke-dashoffset" values="220;0;0;220" keyTimes="0;0.15;0.85;1" dur="4.5s" repeatCount="indefinite"/>
+        </path>
+
+        <!-- trip marker at threshold crossing -->
+        <circle cx="245" cy="46" r="4" fill="#D65C4F">
+          <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.13;0.16;0.85;0.9" dur="4.5s" repeatCount="indefinite"/>
+        </circle>
+      </svg>
+
+      <div class="scope-readout">
+        <div>
+          <div class="scope-metric-label">RESERVED</div>
+          <div class="scope-metric-value mono amber">$182.40</div>
+        </div>
+        <div>
+          <div class="scope-metric-label">BUDGET</div>
+          <div class="scope-metric-value mono">$200.00</div>
+        </div>
+        <div class="scope-state block" id="scope-state-badge">BLOCKED</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap problem">
+      <div class="kicker">The failure mode</div>
+      <h2>AI agents can create catastrophic spend before conventional observability or billing systems have time to react.</h2>
+      <p>A stuck retry loop, a runaway agent, or a leaked key can spend a month's budget in an hour. Billing dashboards tell you what happened after it's already expensive. CirQuit decides before every call executes.</p>
+    </div>
+  </section>
+
+  <section class="pipeline">
+    <div class="wrap">
+      <h2>Every call passes through the same six gates.</h2>
+      <p>Deterministic, not a black box — the same pipeline runs on every request, in order, whether it's request one or request one million.</p>
+
+      <div class="breakers">
+        <div class="breaker">
+          <div class="switch"></div>
+          <div class="breaker-num mono">01</div>
+          <div class="breaker-name">Estimate</div>
+          <div class="breaker-desc">Predict the cost of this call before it's sent anywhere.</div>
+        </div>
+        <div class="breaker">
+          <div class="breaker-trace"></div>
+          <div class="switch"></div>
+          <div class="breaker-num mono">02</div>
+          <div class="breaker-name">Reserve</div>
+          <div class="breaker-desc">Hold that amount against the tenant's budget, atomically.</div>
+        </div>
+        <div class="breaker">
+          <div class="breaker-trace"></div>
+          <div class="switch"></div>
+          <div class="breaker-num mono">03</div>
+          <div class="breaker-name">Risk check</div>
+          <div class="breaker-desc">Score velocity and acceleration against recent history.</div>
+        </div>
+        <div class="breaker">
+          <div class="breaker-trace"></div>
+          <div class="switch"></div>
+          <div class="breaker-num mono">04</div>
+          <div class="breaker-name">Decide</div>
+          <div class="breaker-desc">Allow, throttle, or block — before any money leaves the building.</div>
+        </div>
+        <div class="breaker">
+          <div class="breaker-trace"></div>
+          <div class="switch"></div>
+          <div class="breaker-num mono">05</div>
+          <div class="breaker-name">Execute</div>
+          <div class="breaker-desc">Forward the call to the real provider, only if allowed.</div>
+        </div>
+        <div class="breaker">
+          <div class="breaker-trace"></div>
+          <div class="switch"></div>
+          <div class="breaker-num mono">06</div>
+          <div class="breaker-name">Reconcile</div>
+          <div class="breaker-desc">True up the reservation against actual usage, every time.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="access">
+    <div class="wrap foot-capture">
+      <h2>Get early access.</h2>
+      <p>We're onboarding a small number of teams directly. Tell us your email and we'll follow up before you get anywhere near self-serve.</p>
+      <form class="capture" id="foot-form" novalidate>
+        <label for="foot-email" class="sr-only" style="position:absolute;left:-9999px;">Work email</label>
+        <input id="foot-email" type="email" placeholder="you@company.com" autocomplete="email" required>
+        <div class="hp-field" aria-hidden="true">
+          <label for="foot-website">Leave this field empty</label>
+          <input id="foot-website" name="website" type="text" tabindex="-1" autocomplete="off">
+        </div>
+        <button type="submit">Join the private beta →</button>
+      </form>
+      <div class="capture-status" id="foot-status" role="status"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap footer-row">
+    <span>CirQuit</span>
+    <span>By submitting your email, you agree to be contacted about early access. We don't share it, and send one note when access opens.</span>
+  </div>
+</footer>
+
+<script>
+  // Wired to a real backend: Supabase Edge Function `waitlist-signup`, which
+  // validates, checks the honeypot, rate-limits by IP, and inserts into a
+  // table that has zero RLS policies for anon/authenticated (the function's
+  // service-role key is the only way in). The anon key below is meant to be
+  // public -- it identifies the project, it does not grant table access.
+  const WAITLIST_ENDPOINT = 'https://bsydpzbnkdgxqzrhsmxh.supabase.co/functions/v1/waitlist-signup';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJzeWRwemJua2RneHF6cmhzbXhoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg4NTcxMzIsImV4cCI6MjEwNDQzMzEzMn0.gMwqCn7Nq8GFcbRlaM6HKEL07AjXu7EFPojJD9aTL1w';
+
+  function wireForm(formId, statusId, source) {
+    const form = document.getElementById(formId);
+    const status = document.getElementById(statusId);
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      const input = form.querySelector('input[type="email"]');
+      const honeypot = form.querySelector('input[name="website"]');
+      const email = input.value.trim();
+      const isValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+      const submitBtn = form.querySelector('button[type="submit"]');
+
+      status.classList.remove('ok', 'err');
+      if (!isValid) {
+        status.textContent = 'That doesn\'t look like a valid email — try again.';
+        status.classList.add('show', 'err');
+        return;
+      }
+
+      submitBtn.disabled = true;
+      const originalLabel = submitBtn.textContent;
+      submitBtn.textContent = 'Submitting…';
+
+      fetch(WAITLIST_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({
+          email: email,
+          source: source,
+          referrer: document.referrer || null,
+          consent: true, // implied by submitting, per the disclaimer text in the footer
+          website: honeypot ? honeypot.value : '', // honeypot; always empty for real users
+        }),
+      })
+        .then(function (res) {
+          if (res.status === 429) {
+            throw new Error('Too many attempts from this network — please try again in a bit.');
+          }
+          if (!res.ok) {
+            throw new Error('Something went wrong — please try again.');
+          }
+          return res.json();
+        })
+        .then(function () {
+          status.textContent = 'You\'re on the list — we\'ll be in touch.';
+          status.classList.add('show', 'ok');
+          form.reset();
+        })
+        .catch(function (err) {
+          status.textContent = err.message || 'Something went wrong — please try again.';
+          status.classList.add('show', 'err');
+        })
+        .finally(function () {
+          submitBtn.disabled = false;
+          submitBtn.textContent = originalLabel;
+        });
+    });
+  }
+  wireForm('hero-form', 'hero-status', 'hero');
+  wireForm('foot-form', 'foot-status', 'footer');
+</script>
+
+</body>
+</html>
