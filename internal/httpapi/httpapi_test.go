@@ -56,7 +56,7 @@ func newTestServer(t *testing.T) (srv *Server, keyA, keyB, tenantAID, tenantBID 
 	gw := gateway.New(re, rm, pr, providers, l)
 	route := gateway.RouteConfig{Route: "/agent/execute", Provider: "demo-provider", Model: "demo-model"}
 
-	s := NewServer(gw, rm, re, l, st, route)
+	s := NewServer(gw, rm, re, l, st, route, "")
 	return s, plainA, plainB, tenantA.ID, tenantB.ID
 }
 
