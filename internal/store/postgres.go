@@ -87,6 +87,16 @@ func (p *PostgresStore) CreateAPIKey(ctx context.Context, tenantID string, scope
 		return "", APIKey{}, err
 	}
 
+	// pq.Array(nil) serializes to SQL NULL, not an empty array — which
+	// violates the scopes NOT NULL constraint even though the column has
+	// a DEFAULT '{}' (an explicit NULL in the INSERT overrides the
+	// default). Normalize nil to an empty, non-nil slice so nil/legacy
+	// scope lists (the common unscoped-key case — see httpapi.requireAuth's
+	// legacy compatibility) insert cleanly as '{}'.
+	if scopes == nil {
+		scopes = []string{}
+	}
+
 	const q = `
 		INSERT INTO api_keys (tenant_id, key_prefix, key_hash, scopes)
 		VALUES ($1, $2, $3, $4)
