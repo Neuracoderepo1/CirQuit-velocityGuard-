@@ -47,6 +47,30 @@ type Server struct {
 	// (any scope) are never accepted here — see requireOperator. Empty
 	// means the kill switch endpoint is disabled (404), not open.
 	OperatorToken string
+
+	// ipLimiter and tenantLimiter are opt-in rate limits, configured via
+	// SetRateLimits. Both are nil (unlimited) by default so existing
+	// callers — including every test that constructs a Server directly —
+	// see today's behavior unless they explicitly opt in. cmd/gateway
+	// always configures both for real deployments; see main.go.
+	ipLimiter     *limiter
+	tenantLimiter *limiter
+}
+
+// SetRateLimits enables per-IP and per-tenant request rate limiting.
+// Pass 0 for any rate/burst pair to leave that limiter disabled. IP
+// limiting protects the process itself (connection floods, credential
+// stuffing against Authenticate) and applies before auth; tenant
+// limiting protects your budget/upstream-provider relationship from a
+// single compromised or misbehaving key and applies after auth. Both
+// return 429 Too Many Requests when exceeded, never silently drop.
+func (s *Server) SetRateLimits(ipRPS, ipBurst, tenantRPS, tenantBurst float64) {
+	if ipRPS > 0 && ipBurst > 0 {
+		s.ipLimiter = newLimiter(ipRPS, ipBurst)
+	}
+	if tenantRPS > 0 && tenantBurst > 0 {
+		s.tenantLimiter = newLimiter(tenantRPS, tenantBurst)
+	}
 }
 
 // NewServer wires up the HTTP surface. store.Store is required: every
@@ -60,7 +84,16 @@ func NewServer(gw *gateway.Gateway, rm *reservation.Manager, re *risk.Engine, l 
 	return s
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Applied before routing/auth so it also protects unauthenticated
+	// paths (e.g. repeated bad Authenticate attempts against /proxy/ or
+	// /v1/kill-switch), not just successfully-authenticated tenants.
+	if !s.ipLimiter.allow(clientIP(r)) {
+		http.Error(w, "rate limit exceeded, try again shortly", http.StatusTooManyRequests)
+		return
+	}
+	s.mux.ServeHTTP(w, r)
+}
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/health", s.handleHealth)
@@ -110,6 +143,22 @@ func (s *Server) requireAuth(requiredScope string, next http.HandlerFunc) http.H
 
 		if requiredScope != "" && len(key.Scopes) > 0 && !hasScope(key.Scopes, requiredScope) {
 			http.Error(w, "API key is missing required scope: "+requiredScope, http.StatusForbidden)
+			return
+		}
+		if requiredScope != "" && len(key.Scopes) == 0 {
+			// Audit trail for the legacy/unscoped compatibility path —
+			// an unscoped key just passed a scope check it was never
+			// explicitly granted. Not blocked (see doc comment above),
+			// but never silent either.
+			s.Ledger.Append(ledger.Event{
+				Type:     ledger.LegacyUnscopedKeyUsed,
+				TenantID: tenant.ID,
+				Metadata: map[string]string{"scope": requiredScope, "path": r.URL.Path},
+			})
+		}
+
+		if !s.tenantLimiter.allow(tenant.ID) {
+			http.Error(w, "tenant rate limit exceeded, try again shortly", http.StatusTooManyRequests)
 			return
 		}
 

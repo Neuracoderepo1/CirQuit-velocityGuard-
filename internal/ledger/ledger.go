@@ -29,6 +29,14 @@ const (
 	CircuitClosed       EventType = "CIRCUIT_CLOSED"
 	KillSwitchOn        EventType = "KILL_SWITCH_ACTIVATED"
 	KillSwitchOff       EventType = "KILL_SWITCH_DEACTIVATED"
+
+	// LegacyUnscopedKeyUsed fires whenever a key with no Scopes set
+	// passes a scope-gated request purely via the legacy compatibility
+	// path in httpapi.requireAuth. An unscoped key acts as a skeleton
+	// key across every scope, so this event exists to make that
+	// otherwise-silent fact visible in the audit trail — see
+	// requireAuth's doc comment for why the compatibility path exists.
+	LegacyUnscopedKeyUsed EventType = "LEGACY_UNSCOPED_KEY_USED"
 )
 
 type Event struct {
