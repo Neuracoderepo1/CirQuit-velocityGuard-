@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # Brings up a real Postgres so TestPostgresStore (internal/store)
+    # actually runs in CI instead of silently skipping — previously this
+    # was the only store implementation with zero automated coverage,
+    # since it requires a live database that local sandboxes don't have.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vg
+          POSTGRES_PASSWORD: vg
+          POSTGRES_DB: vg
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vg -d vg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      VG_TEST_POSTGRES_DSN: postgres://vg:vg@localhost:5432/vg?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Apply control-plane migrations
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          for f in migrations/*.sql; do
+            echo "applying $f"
+            psql "$VG_TEST_POSTGRES_DSN" -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: gofmt check
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      # -race is deliberate, not incidental: this project's core promise
+      # is a concurrency-safe budget invariant (reserved+settled <=
+      # limit), so every CI run must exercise the race detector, not
+      # just pass/fail on functional assertions.
+      - name: go test (race)
+        run: go test -race -count=1 ./...
