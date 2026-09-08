@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // StoreMode selects the control-plane persistence backend.
@@ -46,6 +47,26 @@ type Config struct {
 	// permitted to forward to. Callers can never supply their own
 	// destination — see internal/provider.GenericHTTP's AllowedHosts.
 	UpstreamURL string
+
+	// Rate limits, applied in internal/httpapi via Server.SetRateLimits.
+	// IP limits protect the process itself (connection floods, credential
+	// stuffing); tenant limits protect your budget/upstream relationship
+	// from a single misbehaving or compromised key. Defaults are
+	// generous enough not to bother a well-behaved integration but real
+	// enough to stop an unbounded loop from taking the process down.
+	RateLimitIPPerSec     float64
+	RateLimitIPBurst      float64
+	RateLimitTenantPerSec float64
+	RateLimitTenantBurst  float64
+
+	// HTTP server timeouts. Left unconfigurable via env for now (fixed,
+	// sane defaults) — see cmd/gateway/main.go. Bare http.ListenAndServe
+	// has no timeouts at all, which leaves the process open to slow-loris
+	// style connection exhaustion; every field here closes that gap.
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
 }
 
 // Load reads configuration from the environment and validates it.
@@ -60,6 +81,18 @@ func Load() (Config, error) {
 		DemoBudgetMinor: 1000, // $10.00 default, overridable below
 		OperatorToken:   os.Getenv("VG_OPERATOR_TOKEN"),
 		UpstreamURL:     os.Getenv("VG_UPSTREAM_URL"),
+
+		// Defaults: generous per-tenant/IP ceilings, not a throughput
+		// target. Override via env for real traffic profiles.
+		RateLimitIPPerSec:     20,
+		RateLimitIPBurst:      40,
+		RateLimitTenantPerSec: 10,
+		RateLimitTenantBurst:  20,
+
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      35 * time.Second, // slightly above the gateway's own 30s upstream timeout
+		IdleTimeout:       120 * time.Second,
 	}
 
 	if v := os.Getenv("VG_DEMO_BUDGET_MINOR"); v != "" {
@@ -68,6 +101,21 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("VG_DEMO_BUDGET_MINOR: invalid integer: %w", err)
 		}
 		c.DemoBudgetMinor = n
+	}
+
+	for env, dst := range map[string]*float64{
+		"VG_RATE_LIMIT_IP_RPS":       &c.RateLimitIPPerSec,
+		"VG_RATE_LIMIT_IP_BURST":     &c.RateLimitIPBurst,
+		"VG_RATE_LIMIT_TENANT_RPS":   &c.RateLimitTenantPerSec,
+		"VG_RATE_LIMIT_TENANT_BURST": &c.RateLimitTenantBurst,
+	} {
+		if v := os.Getenv(env); v != "" {
+			n, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return Config{}, fmt.Errorf("%s: invalid number: %w", env, err)
+			}
+			*dst = n
+		}
 	}
 
 	if err := c.Validate(); err != nil {
@@ -103,6 +151,16 @@ func (c Config) Validate() error {
 	}
 	if c.OperatorToken != "" && len(c.OperatorToken) < 32 {
 		return fmt.Errorf("VG_OPERATOR_TOKEN must be at least 32 characters")
+	}
+	for name, v := range map[string]float64{
+		"VG_RATE_LIMIT_IP_RPS":       c.RateLimitIPPerSec,
+		"VG_RATE_LIMIT_IP_BURST":     c.RateLimitIPBurst,
+		"VG_RATE_LIMIT_TENANT_RPS":   c.RateLimitTenantPerSec,
+		"VG_RATE_LIMIT_TENANT_BURST": c.RateLimitTenantBurst,
+	} {
+		if v < 0 {
+			return fmt.Errorf("%s must be >= 0 (0 disables that limiter)", name)
+		}
 	}
 	return nil
 }

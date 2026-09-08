@@ -47,20 +47,35 @@ func main() {
 		st = store.NewMemoryStore()
 	}
 
-	// Bootstrap the demo tenant + a fresh API key through the control
-	// plane (never a trusted client header) so the golden-path scenario
-	// (section 31) is reachable via real HTTP auth.
-	tenant, err := st.CreateTenant(ctx, "Demo Corp", cfg.DemoTenantSlug)
-	if err != nil {
-		log.Fatalf("bootstrapping demo tenant: %v", err)
-	}
-	plaintextKey, _, err := st.CreateAPIKey(ctx, tenant.ID, []string{"proxy:write", "read:exposure"})
-	if err != nil {
-		log.Fatalf("bootstrapping demo API key: %v", err)
-	}
-
 	rm := reservation.NewManager()
-	rm.SetBudget(tenant.ID, money.FromFloat(float64(cfg.DemoBudgetMinor)/100.0))
+
+	// The auto-created demo tenant (with its plaintext key printed to
+	// stdout) only makes sense in memory/dev mode, where the process
+	// starts with an empty store every time and there's no other way to
+	// get a working key. In postgres mode this is a real, persistent
+	// control plane — printing a fresh plaintext key to logs on every
+	// boot would put a live credential into whatever aggregates this
+	// process's stdout. Production tenants/keys should be provisioned
+	// out-of-band (there is no admin API for this yet — see README
+	// "Status"; this is scaffolding, not a complete control plane).
+	var plaintextKey string
+	if cfg.StoreMode == config.StoreModePostgres {
+		log.Printf("store mode is postgres: skipping demo tenant bootstrap")
+		log.Printf("provision tenants, API keys, and budgets via the store directly (no admin API yet) before routing real traffic")
+	} else {
+		tenant, err := st.CreateTenant(ctx, "Demo Corp", cfg.DemoTenantSlug)
+		if err != nil {
+			log.Fatalf("bootstrapping demo tenant: %v", err)
+		}
+		plaintextKey, _, err = st.CreateAPIKey(ctx, tenant.ID, []string{"proxy:write", "read:exposure"})
+		if err != nil {
+			log.Fatalf("bootstrapping demo API key: %v", err)
+		}
+		rm.SetBudget(tenant.ID, money.FromFloat(float64(cfg.DemoBudgetMinor)/100.0))
+		log.Printf("demo tenant %q created; API key (shown once, never stored in plaintext):", tenant.Name)
+		log.Printf("  %s", plaintextKey)
+		log.Printf("try: curl -X POST %s/proxy/x -H 'Authorization: Bearer %s'", cfg.Addr, plaintextKey)
+	}
 
 	re := risk.NewEngine(rm, risk.DefaultPolicy())
 
@@ -99,13 +114,26 @@ func main() {
 
 	route := gateway.RouteConfig{Route: "/agent/execute", Provider: "demo-provider", Model: "demo-model"}
 	srv := httpapi.NewServer(gw, rm, re, l, st, route, cfg.OperatorToken)
+	srv.SetRateLimits(cfg.RateLimitIPPerSec, cfg.RateLimitIPBurst, cfg.RateLimitTenantPerSec, cfg.RateLimitTenantBurst)
 
 	log.Printf("VelocityGuard gateway listening on %s (store mode: %s)", cfg.Addr, cfg.StoreMode)
-	log.Printf("demo tenant %q created; API key (shown once, never stored in plaintext):", tenant.Name)
-	log.Printf("  %s", plaintextKey)
-	log.Printf("try: curl -X POST %s/proxy/x -H 'Authorization: Bearer %s'", cfg.Addr, plaintextKey)
+	log.Printf("rate limits — per-IP: %.0f req/s (burst %.0f), per-tenant: %.0f req/s (burst %.0f)",
+		cfg.RateLimitIPPerSec, cfg.RateLimitIPBurst, cfg.RateLimitTenantPerSec, cfg.RateLimitTenantBurst)
 	if cfg.OperatorToken == "" {
 		log.Printf("VG_OPERATOR_TOKEN not set: /v1/kill-switch is disabled (404), not open")
 	}
-	log.Fatal(http.ListenAndServe(cfg.Addr, srv))
+
+	// A bare http.ListenAndServe has no timeouts at all, which leaves the
+	// process open to slow-loris style connection exhaustion (a client
+	// that opens a connection and trickles bytes, or never closes an idle
+	// keep-alive). Every field below closes one such gap; see config.go.
+	httpSrv := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           srv,
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
+	}
+	log.Fatal(httpSrv.ListenAndServe())
 }
