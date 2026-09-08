@@ -12,6 +12,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"velocityguard/internal/config"
@@ -72,17 +73,39 @@ func main() {
 
 	mock := provider.NewMockProvider("demo-provider", nil) // default usage: ~$0.03/call
 	providers := provider.NewRegistry()
-	providers.Register(mock)
+
+	// When an upstream is configured, route real traffic to it instead
+	// of the mock — the demo tenant/route stays the same, but /proxy/*
+	// now actually forwards. AllowedHosts is derived from the configured
+	// URL itself so there is exactly one reachable destination.
+	if cfg.UpstreamURL != "" {
+		u, err := url.Parse(cfg.UpstreamURL)
+		if err != nil {
+			log.Fatalf("invalid VG_UPSTREAM_URL: %v", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			log.Fatalf("VG_UPSTREAM_URL must be http or https, got %q", u.Scheme)
+		}
+		generic := provider.NewGenericHTTP("demo-provider", cfg.UpstreamURL, []string{u.Host})
+		providers.Register(generic)
+		log.Printf("proxying /proxy/* to upstream %s (allowlisted host: %s)", cfg.UpstreamURL, u.Host)
+	} else {
+		providers.Register(mock)
+		log.Printf("VG_UPSTREAM_URL not set; /proxy/* uses the built-in mock provider (demo mode)")
+	}
 
 	l := ledger.New()
 	gw := gateway.New(re, rm, pr, providers, l)
 
 	route := gateway.RouteConfig{Route: "/agent/execute", Provider: "demo-provider", Model: "demo-model"}
-	srv := httpapi.NewServer(gw, rm, re, l, st, route)
+	srv := httpapi.NewServer(gw, rm, re, l, st, route, cfg.OperatorToken)
 
 	log.Printf("VelocityGuard gateway listening on %s (store mode: %s)", cfg.Addr, cfg.StoreMode)
 	log.Printf("demo tenant %q created; API key (shown once, never stored in plaintext):", tenant.Name)
 	log.Printf("  %s", plaintextKey)
 	log.Printf("try: curl -X POST %s/proxy/x -H 'Authorization: Bearer %s'", cfg.Addr, plaintextKey)
+	if cfg.OperatorToken == "" {
+		log.Printf("VG_OPERATOR_TOKEN not set: /v1/kill-switch is disabled (404), not open")
+	}
 	log.Fatal(http.ListenAndServe(cfg.Addr, srv))
 }

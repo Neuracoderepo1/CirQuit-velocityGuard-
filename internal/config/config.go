@@ -34,6 +34,18 @@ type Config struct {
 	// running in memory mode with no existing data. Ignored otherwise.
 	DemoTenantSlug  string
 	DemoBudgetMinor int64 // budget limit in minor currency units (cents)
+
+	// OperatorToken authenticates the kill-switch endpoint. It is never
+	// a tenant API key — the kill switch is an operator-only control
+	// plane. Required (and must be >=32 chars) in postgres/production
+	// mode; optional (with a warning) in memory/demo mode so the local
+	// demo binary keeps working without extra setup.
+	OperatorToken string
+
+	// UpstreamURL is the single allowlisted destination the proxy is
+	// permitted to forward to. Callers can never supply their own
+	// destination — see internal/provider.GenericHTTP's AllowedHosts.
+	UpstreamURL string
 }
 
 // Load reads configuration from the environment and validates it.
@@ -46,6 +58,8 @@ func Load() (Config, error) {
 		PostgresDSN:     os.Getenv("VG_POSTGRES_DSN"),
 		DemoTenantSlug:  getEnvDefault("VG_DEMO_TENANT_SLUG", "demo-corp"),
 		DemoBudgetMinor: 1000, // $10.00 default, overridable below
+		OperatorToken:   os.Getenv("VG_OPERATOR_TOKEN"),
+		UpstreamURL:     os.Getenv("VG_UPSTREAM_URL"),
 	}
 
 	if v := os.Getenv("VG_DEMO_BUDGET_MINOR"); v != "" {
@@ -81,6 +95,14 @@ func (c Config) Validate() error {
 	}
 	if c.DemoBudgetMinor < 0 {
 		return fmt.Errorf("VG_DEMO_BUDGET_MINOR must be >= 0")
+	}
+	// Postgres mode is the production/durable path — fail fast rather
+	// than let the kill switch silently run without operator auth.
+	if c.StoreMode == StoreModePostgres && len(c.OperatorToken) < 32 {
+		return fmt.Errorf("VG_STORE_MODE=postgres requires VG_OPERATOR_TOKEN to be set and at least 32 characters")
+	}
+	if c.OperatorToken != "" && len(c.OperatorToken) < 32 {
+		return fmt.Errorf("VG_OPERATOR_TOKEN must be at least 32 characters")
 	}
 	return nil
 }

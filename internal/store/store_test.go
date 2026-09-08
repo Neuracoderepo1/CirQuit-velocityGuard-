@@ -112,6 +112,19 @@ func runStoreSuite(t *testing.T, s Store) {
 		}
 	})
 
+	// Regression test: against Postgres, an id that isn't even
+	// syntactically a valid UUID must still come back as ErrNotFound,
+	// not a raw driver/query error — a malformed id can never match a
+	// row either way, so from the caller's perspective it's simply
+	// not-found. (MemoryStore has no UUID typing to trip on this, but
+	// runs the same assertion for parity.)
+	t.Run("RevokeAPIKey_malformed_id_rejected", func(t *testing.T) {
+		err := s.RevokeAPIKey(ctx, "not-a-valid-uuid")
+		if err != ErrNotFound {
+			t.Fatalf("got err %v, want ErrNotFound", err)
+		}
+	})
+
 	t.Run("TenantIsolation_key_from_one_tenant_authenticates_only_that_tenant", func(t *testing.T) {
 		tenantA, _ := s.CreateTenant(ctx, "Tenant A", uniqueSlug(t))
 		tenantB, _ := s.CreateTenant(ctx, "Tenant B", uniqueSlug(t))

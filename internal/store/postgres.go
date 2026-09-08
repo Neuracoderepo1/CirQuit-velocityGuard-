@@ -69,6 +69,17 @@ func (p *PostgresStore) GetTenant(ctx context.Context, id string) (Tenant, error
 	if errors.Is(err, sql.ErrNoRows) {
 		return Tenant{}, ErrNotFound
 	}
+	// id is a UUID column; a caller-supplied id that isn't even
+	// syntactically a valid UUID (e.g. "no-such-tenant") can never match
+	// a row, so Postgres's "invalid input syntax for type uuid" (22P02)
+	// is semantically equivalent to not-found here, not a real query
+	// error. Without this, malformed IDs surface as an opaque 500-style
+	// error instead of the same ErrNotFound a well-formed-but-absent
+	// UUID produces.
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "22P02" {
+		return Tenant{}, ErrNotFound
+	}
 	if err != nil {
 		return Tenant{}, fmt.Errorf("querying tenant: %w", err)
 	}
@@ -85,6 +96,16 @@ func (p *PostgresStore) CreateAPIKey(ctx context.Context, tenantID string, scope
 	plaintext, hash, prefix, err := generatePlaintextKey()
 	if err != nil {
 		return "", APIKey{}, err
+	}
+
+	// pq.Array(nil) serializes to SQL NULL, not an empty array — which
+	// violates the scopes NOT NULL constraint even though the column has
+	// a DEFAULT '{}' (an explicit NULL in the INSERT overrides the
+	// default). Normalize nil to an empty, non-nil slice so nil/legacy
+	// scope lists (the common unscoped-key case — see httpapi.requireAuth's
+	// legacy compatibility) insert cleanly as '{}'.
+	if scopes == nil {
+		scopes = []string{}
 	}
 
 	const q = `
@@ -136,6 +157,13 @@ func (p *PostgresStore) RevokeAPIKey(ctx context.Context, keyID string) error {
 	const q = `UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`
 	res, err := p.db.ExecContext(ctx, q, keyID)
 	if err != nil {
+		// Same class of issue as GetTenant: keyID that isn't even a
+		// syntactically valid UUID can never match a row, so treat it
+		// as not-found rather than a query error.
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "22P02" {
+			return ErrNotFound
+		}
 		return fmt.Errorf("revoking api key: %w", err)
 	}
 	n, err := res.RowsAffected()
